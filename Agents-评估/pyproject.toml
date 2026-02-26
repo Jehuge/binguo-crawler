@@ -1,0 +1,13 @@
+[project]
+name = "comment-agent"
+version = "0.1.0"
+description = "评论分析Agent"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
+    "ollama>=0.1.0",
+]
+
+[tool.uv]
+dev-dependencies = []

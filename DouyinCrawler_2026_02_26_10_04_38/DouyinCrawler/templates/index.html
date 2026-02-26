@@ -1,0 +1,1140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>抖音-缤果S数据爬取 - 视频评论采集</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: #ffffff;
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        /* 头部 */
+        .header {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        
+        .header p {
+            color: #666;
+        }
+        
+        /* 卡片 */
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .card-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .card-title .icon {
+            width: 24px;
+            height: 24px;
+        }
+        
+        /* 登录区域 */
+        .login-area {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        
+        .login-status {
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+        }
+        
+        .login-status.success {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .login-status.warning {
+            background: #fff3cd;
+            color: #856404;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+        
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        
+        .btn-success:hover {
+            background: #218838;
+        }
+        
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background: #c82333;
+        }
+        
+        .btn-sm {
+            padding: 5px 12px;
+            font-size: 12px;
+        }
+        
+        /* 进度条样式 */
+        .progress-container {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #333;
+        }
+        
+        .progress-bar {
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: #28a745; /* 绿色，避免蓝紫渐变 */
+            border-radius: 10px;
+            transition: width 0.3s ease;
+        }
+        
+        .current-video {
+            margin-top: 10px;
+            font-size: 12px;
+            color: #666;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .progress-actions {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+        }
+        
+        .btn-danger:hover {
+            background: #c82333;
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        /* 搜索区域 */
+        .search-form {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: flex-end;
+        }
+        
+        .form-group {
+            flex: 1;
+            min-width: 200px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 0.9rem;
+            color: #666;
+        }
+        
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 10px 14px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+        
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        /* 视频列表 */
+        .video-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+            margin-top: 16px;
+        }
+        
+        .video-item {
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 12px;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+        }
+        
+        .video-item:hover {
+            border-color: #667eea;
+            transform: translateY(-4px);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+        }
+        
+        .video-item.selected {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+        
+        .video-item .checkbox {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            width: 24px;
+            height: 24px;
+            background: white;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            z-index: 1;
+        }
+        
+        .video-item.selected .checkbox {
+            background: #667eea;
+            border-color: #667eea;
+        }
+        
+        .video-item.selected .checkbox::after {
+            content: '';
+            display: block;
+            width: 12px;
+            height: 12px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='white'%3E%3Cpath d='M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'/%3E%3C/svg%3E");
+            background-size: contain;
+            background-repeat: no-repeat;
+        }
+        
+        .video-cover {
+            width: 100%;
+            height: 160px;
+            object-fit: cover;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            background: #f5f5f5;
+        }
+        
+        .video-title {
+            font-size: 0.95rem;
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 8px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        
+        .video-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            color: #666;
+        }
+        
+        .video-author {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 8px;
+        }
+        
+        .video-author img {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+        }
+        
+        /* 操作按钮 */
+        .action-bar {
+            display: flex;
+            gap: 12px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+        
+        /* 标签页 */
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 8px;
+        }
+        
+        .tab {
+            padding: 8px 16px;
+            border: none;
+            background: none;
+            font-size: 1rem;
+            cursor: pointer;
+            color: #666;
+            border-radius: 8px 8px 0 0;
+            transition: all 0.3s;
+        }
+        
+        .tab.active {
+            color: #667eea;
+            background: #f0f4ff;
+        }
+        
+        .tab:hover {
+            color: #667eea;
+        }
+        
+        /* 数据表格 */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+        }
+        
+        .data-table th,
+        .data-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .data-table th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .data-table tr:hover {
+            background: #f8f9fa;
+        }
+        
+        /* 加载动画 */
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .loading.active {
+            display: block;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        /* 空状态 */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+        
+        .empty-state .icon {
+            margin-bottom: 16px;
+        }
+        
+        .empty-state .icon svg {
+            display: block;
+            margin: 0 auto;
+        }
+        
+        /* 统计信息 */
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        
+        .stat-item {
+            background: #667eea;
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        
+        .stat-label {
+            font-size: 0.9rem;
+        }
+        
+        /* Toast 提示 */
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 16px 24px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 1000;
+            transform: translateX(400px);
+            transition: transform 0.3s;
+        }
+        
+        .toast.show {
+            transform: translateX(0);
+        }
+        
+        .toast.success {
+            border-left: 4px solid #28a745;
+        }
+        
+        .toast.error {
+            border-left: 4px solid #dc3545;
+        }
+        
+        /* 模态框 */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .modal.active {
+            display: flex;
+        }
+        
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 90%;
+            max-height: 90%;
+            overflow: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 头部 -->
+        <div class="header">
+            <h1>
+                <svg style="width:40px;height:40px;vertical-align:middle" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="#FE2C55"/>
+                    <path d="M17.35 8.5L12 13.85L6.65 8.5L5.25 9.9L12 16.65L18.75 9.9L17.35 8.5Z" fill="#25F4EE"/>
+                </svg>
+                缤果系列-抖音爬虫
+            </h1>
+            <p>视频评论采集工具 - 输入关键字搜索视频，批量爬取评论数据</p>
+        </div>
+        
+        <!-- 登录区域 -->
+        <div class="card">
+            <div class="card-title">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z" fill="#667eea"/>
+                </svg>
+                登录状态
+            </div>
+            <div class="login-area">
+                <span id="loginStatus" class="login-status warning">未登录</span>
+                <button id="loginBtn" class="btn btn-primary">扫码登录抖音</button>
+            </div>
+        </div>
+        
+        <!-- 搜索区域 -->
+        <div class="card">
+            <div class="card-title">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="#667eea"/>
+                </svg>
+                搜索视频
+            </div>
+            <div class="search-form">
+                <div class="form-group">
+                    <label>搜索关键字</label>
+                    <input type="text" id="keyword" placeholder="输入要搜索的关键字...">
+                </div>
+                <div class="form-group">
+                    <label>排序方式</label>
+                    <select id="sortType">
+                        <option value="0">综合排序</option>
+                        <option value="1">点赞最多</option>
+                        <option value="2">最新发布</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>发布时间</label>
+                    <select id="publishTime">
+                        <option value="0">不限</option>
+                        <option value="1">一天内</option>
+                        <option value="7">一周内</option>
+                        <option value="180">半年内</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>最大数量</label>
+                    <input type="number" id="maxCount" value="30" min="1" max="100">
+                </div>
+                <button id="searchBtn" class="btn btn-primary">搜索</button>
+            </div>
+        </div>
+        
+        <!-- 视频列表 -->
+        <div class="card" id="videoListCard" style="display: none;">
+            <div class="card-title">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4z" fill="#667eea"/>
+                </svg>
+                搜索结果
+                <span id="videoCount" style="font-size: 0.9rem; color: #666; font-weight: normal;"></span>
+            </div>
+            <div id="selectedInfo" style="margin-bottom: 12px; color: #666;">
+                已选择 <span id="selectedCount">0</span> 个视频
+            </div>
+            <div class="loading" id="searchLoading">
+                <div class="spinner"></div>
+                <p>搜索中...</p>
+            </div>
+            <div class="video-list" id="videoList"></div>
+            
+            <div class="action-bar">
+                <button id="selectAllBtn" class="btn btn-primary">全选</button>
+                <button id="crawlBtn" class="btn btn-success" disabled>开始爬取评论</button>
+            </div>
+            
+            <!-- 爬取进度显示 -->
+            <div id="progressContainer" class="progress-container" style="display: none;">
+                <div class="progress-header">
+                    <span id="progressText">爬取进度: 0%</span>
+                    <span id="progressStatus"></span>
+                </div>
+                <div class="progress-bar">
+                    <div id="progressFill" class="progress-fill" style="width: 0%;"></div>
+                </div>
+                <div id="currentVideo" class="current-video"></div>
+                <div id="videoCommentCount" class="current-video"></div>
+                <div class="progress-actions">
+                    <button id="continueBtn" class="btn btn-sm btn-primary" style="display: none;">继续爬取</button>
+                    <button id="stopBtn" class="btn btn-sm btn-danger" style="display: none;">停止</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Toast 提示 -->
+    <div class="toast" id="toast"></div>
+    
+    <script>
+        // 预定义的默认图片（Base64编码的简单SVG）
+        var defaultCover = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="160"%3E%3Crect fill="%23f5f5f5" width="200" height="160"/%3E%3Ctext fill="%23999" x="50%25" y="50%25" text-anchor="middle" dy=".3em"%3E%E6%9A%82%E5%B0%81%E9%9D%A2%3C/text%3E%3C/svg%3E';
+        var defaultAvatar = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="24" height="24"%3E%3Ccircle cx="12" cy="12" r="10" fill="%23ddd"/%3E%3C/svg%3E';
+        
+        // 状态变量
+        var selectedVideos = [];
+        var videos = [];
+        var comments = [];
+        
+        // DOM 元素
+        var loginStatus = document.getElementById('loginStatus');
+        var loginBtn = document.getElementById('loginBtn');
+        var keywordInput = document.getElementById('keyword');
+        var sortTypeSelect = document.getElementById('sortType');
+        var publishTimeSelect = document.getElementById('publishTime');
+        var maxCountInput = document.getElementById('maxCount');
+        var searchBtn = document.getElementById('searchBtn');
+        var videoListCard = document.getElementById('videoListCard');
+        var videoList = document.getElementById('videoList');
+        var videoCount = document.getElementById('videoCount');
+        var selectedCount = document.getElementById('selectedCount');
+        var selectedInfo = document.getElementById('selectedInfo');
+        var searchLoading = document.getElementById('searchLoading');
+        var selectAllBtn = document.getElementById('selectAllBtn');
+        var crawlBtn = document.getElementById('crawlBtn');
+        var toast = document.getElementById('toast');
+        
+        // Toast 提示
+        function showToast(message, type) {
+            toast.textContent = message;
+            toast.className = 'toast ' + type + ' show';
+            setTimeout(function() {
+                toast.className = 'toast';
+            }, 3000);
+        }
+        
+        // 登录相关
+        loginBtn.addEventListener('click', async function() {
+            loginBtn.disabled = true;
+            loginBtn.textContent = '正在打开浏览器...';
+            
+            try {
+                var res = await fetch('/api/login/start', { method: 'POST' });
+                var data = await res.json();
+                
+                if (data.success) {
+                    showToast(data.message || '请扫码登录');
+                    loginBtn.textContent = '等待扫码...';
+                    
+                    // 轮询检查登录状态
+                    var pollInterval = setInterval(async function() {
+                        try {
+                            var statusRes = await fetch('/api/login/status');
+                            var statusData = await statusRes.json();
+                            
+                            if (statusData.logged_in) {
+                                clearInterval(pollInterval);
+                                loginStatus.textContent = '已登录';
+                                loginStatus.className = 'login-status success';
+                                loginBtn.textContent = '已登录';
+                                loginBtn.disabled = true;
+                                showToast('登录成功！');
+                            }
+                        } catch (e) {
+                            console.error('检查登录状态失败:', e);
+                        }
+                    }, 3000);
+                    
+                    // 30秒后如果还没登录，提醒用户
+                    setTimeout(function() {
+                        if (!loginBtn.disabled) {
+                            loginBtn.disabled = false;
+                            loginBtn.textContent = '扫码登录抖音';
+                            showToast('登录超时，请重试', 'error');
+                        }
+                    }, 30000);
+                } else {
+                    showToast(data.message || '登录失败', 'error');
+                    loginBtn.disabled = false;
+                    loginBtn.textContent = '扫码登录抖音';
+                }
+            } catch (e) {
+                showToast('登录出错: ' + e.message, 'error');
+                loginBtn.disabled = false;
+                loginBtn.textContent = '扫码登录抖音';
+            }
+        });
+        
+        // 检查登录状态
+        async function checkLoginStatus() {
+            try {
+                var res = await fetch('/api/login/status');
+                var data = await res.json();
+                
+                if (data.logged_in) {
+                    loginStatus.textContent = '已登录';
+                    loginStatus.className = 'login-status success';
+                    loginBtn.textContent = '已登录';
+                    loginBtn.disabled = true;
+                } else {
+                    loginStatus.textContent = data.message || '未登录';
+                    loginStatus.className = 'login-status warning';
+                }
+            } catch (e) {
+                console.error('检查登录状态失败:', e);
+            }
+        }
+        
+        // 搜索视频
+        searchBtn.addEventListener('click', async function() {
+            var keyword = keywordInput.value.trim();
+            if (!keyword) {
+                showToast('请输入搜索关键字', 'error');
+                return;
+            }
+            
+            searchLoading.classList.add('active');
+            videoList.innerHTML = '';
+            videoListCard.style.display = 'block';
+            
+            try {
+                var res = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        keyword: keyword,
+                        sort_type: parseInt(sortTypeSelect.value),
+                        publish_time: parseInt(publishTimeSelect.value),
+                        max_count: parseInt(maxCountInput.value)
+                    })
+                });
+                var data = await res.json();
+                
+                if (data.success) {
+                    videos = data.videos;
+                    renderVideoList(videos);
+                    videoCount.textContent = '(' + data.total + ' 个视频)';
+                    showToast('找到 ' + data.total + ' 个视频');
+                } else {
+                    showToast(data.detail || '搜索失败', 'error');
+                }
+            } catch (e) {
+                showToast('搜索出错: ' + e.message, 'error');
+            } finally {
+                searchLoading.classList.remove('active');
+            }
+        });
+        
+        // 渲染视频列表
+        function renderVideoList(videoListData) {
+            videoList.innerHTML = '';
+            selectedVideos = [];
+            updateSelectedCount();
+            
+            if (videoListData.length === 0) {
+                videoList.innerHTML = '<div class="empty-state"><div class="icon"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z" fill="#ccc"/></svg></div><p>没有找到相关视频</p></div>';
+                return;
+            }
+            
+            videoListData.forEach(function(video, index) {
+                var item = document.createElement('div');
+                item.className = 'video-item';
+                item.dataset.awemeId = video.aweme_id;
+                
+                var coverUrl = video.cover_url || defaultCover;
+                var avatarUrl = video.avatar || defaultAvatar;
+                var title = video.title || '无标题';
+                var nickname = video.nickname || '未知用户';
+                var likedStr = video.liked_count_str || '0';
+                var commentStr = video.comment_count_str || '0';
+                var timeStr = video.create_time_str || '';
+                
+                item.innerHTML = '<div class="checkbox"></div>' +
+                    '<img class="video-cover" src="' + coverUrl + '">' +
+                    '<div class="video-title">' + title + '</div>' +
+                    '<div class="video-info">' +
+                    '<span>赞 ' + likedStr + '</span>' +
+                    '<span>评 ' + commentStr + '</span>' +
+                    '<span>' + timeStr + '</span></div>' +
+                    '<div class="video-author">' +
+                    '<img src="' + avatarUrl + '">' +
+                    '<span>' + nickname + '</span></div>';
+                
+                item.addEventListener('click', (function(awemeId) {
+                    return function() { toggleVideoSelect(awemeId, item); };
+                })(video.aweme_id));
+                videoList.appendChild(item);
+            });
+        }
+        
+        // 选择/取消选择视频
+        function toggleVideoSelect(awemeId, element) {
+            var index = selectedVideos.indexOf(awemeId);
+            if (index > -1) {
+                selectedVideos.splice(index, 1);
+                element.classList.remove('selected');
+            } else {
+                selectedVideos.push(awemeId);
+                element.classList.add('selected');
+            }
+            updateSelectedCount();
+        }
+        
+        // 更新已选数量
+        function updateSelectedCount() {
+            selectedCount.textContent = selectedVideos.length;
+            crawlBtn.disabled = selectedVideos.length === 0;
+        }
+        
+        // 全选
+        selectAllBtn.addEventListener('click', function() {
+            var items = videoList.querySelectorAll('.video-item');
+            if (selectedVideos.length === videos.length) {
+                // 取消全选
+                selectedVideos = [];
+                items.forEach(function(item) { item.classList.remove('selected'); });
+            } else {
+                // 全选
+                selectedVideos = videos.map(function(v) { return v.aweme_id; });
+                items.forEach(function(item) { item.classList.add('selected'); });
+            }
+            updateSelectedCount();
+        });
+        
+        // 爬取评论
+        var progressInterval = null;
+        
+        crawlBtn.addEventListener('click', async function() {
+            if (selectedVideos.length === 0) {
+                showToast('请选择要爬取的视频', 'error');
+                return;
+            }
+            
+            crawlBtn.disabled = true;
+            crawlBtn.textContent = '爬取中...';
+            
+            try {
+                var res = await fetch('/api/crawl', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        video_ids: selectedVideos,
+                        max_comments: 0,
+                        delay: 3.0
+                    })
+                });
+                var data = await res.json();
+                
+                if (data.success) {
+                    showToast(data.message);
+                    // 显示进度条
+                    document.getElementById('progressContainer').style.display = 'block';
+                    document.getElementById('stopBtn').style.display = 'inline-block';
+                    // 开始轮询进度
+                    startProgressPolling();
+                } else {
+                    showToast(data.detail || '爬取失败', 'error');
+                    crawlBtn.disabled = false;
+                    crawlBtn.textContent = '开始爬取评论';
+                }
+            } catch (e) {
+                showToast('爬取出错: ' + e.message, 'error');
+                crawlBtn.disabled = false;
+                crawlBtn.textContent = '开始爬取评论';
+            }
+        });
+        
+        // 恢复进度显示（页面刷新时）
+        async function recoverProgress() {
+            try {
+                var res = await fetch('/api/crawl/progress');
+                var data = await res.json();
+                
+                if (data.success && data.data && data.data.total_videos > 0) {
+                    var status = data.data;
+                    document.getElementById('progressContainer').style.display = 'block';
+                    
+                    var progressFill = document.getElementById('progressFill');
+                    var progressText = document.getElementById('progressText');
+                    var currentVideo = document.getElementById('currentVideo');
+                    var videoCommentCount = document.getElementById('videoCommentCount');
+                    var continueBtn = document.getElementById('continueBtn');
+                    var stopBtn = document.getElementById('stopBtn');
+                    
+                    progressFill.style.width = status.progress_percent + '%';
+                    progressText.textContent = '爬取进度: ' + status.progress_percent + '% (' + status.completed_count + '/' + status.total_videos + ')';
+                    
+                    if (status.current_video_title) {
+                        currentVideo.textContent = '正在爬取: ' + status.current_video_title;
+                    }
+                    if (status.current_video_comment_count > 0) {
+                        videoCommentCount.textContent = '当前视频评论数: ' + status.current_video_comment_count;
+                    }
+                    
+                    if (status.is_running) {
+                        crawlBtn.disabled = true;
+                        crawlBtn.textContent = '爬取中...';
+                        stopBtn.style.display = 'inline-block';
+                        continueBtn.style.display = 'none';
+                        startProgressPolling();
+                    } else {
+                        if (status.failed_count > 0 || status.completed_count < status.total_videos) {
+                            continueBtn.style.display = 'inline-block';
+                        }
+                        stopBtn.style.display = 'none';
+                    }
+                }
+            } catch(e) {
+                console.error("恢复进度失败:", e);
+            }
+        }
+
+        // 开始轮询进度
+        function startProgressPolling() {
+            if (progressInterval) clearInterval(progressInterval);
+            
+            progressInterval = setInterval(async function() {
+                try {
+                    var res = await fetch('/api/crawl/progress');
+                    var data = await res.json();
+                    
+                    if (data.success) {
+                        var status = data.data;
+                        var progressFill = document.getElementById('progressFill');
+                        var progressText = document.getElementById('progressText');
+                        var currentVideo = document.getElementById('currentVideo');
+                        var videoCommentCount = document.getElementById('videoCommentCount');
+                        var continueBtn = document.getElementById('continueBtn');
+                        var stopBtn = document.getElementById('stopBtn');
+                        
+                        progressFill.style.width = status.progress_percent + '%';
+                        progressText.textContent = '爬取进度: ' + status.progress_percent + '% (' + status.completed_count + '/' + status.total_videos + ')';
+                        
+                        if (status.current_video_title) {
+                            currentVideo.textContent = '正在爬取: ' + status.current_video_title;
+                        }
+                        
+                        // 显示当前视频评论数
+                        if (status.current_video_comment_count > 0) {
+                            videoCommentCount.textContent = '当前视频评论数: ' + status.current_video_comment_count;
+                        } else {
+                            videoCommentCount.textContent = '';
+                        }
+                        
+                        // 检查爬取是否完成
+                        if (!status.is_running) {
+                            clearInterval(progressInterval);
+                            progressInterval = null;
+                            crawlBtn.disabled = false;
+                            crawlBtn.textContent = '开始爬取评论';
+                            
+                            if (status.failed_count > 0) {
+                                showToast('爬取结束，成功 ' + status.completed_count + ' 个，失败 ' + status.failed_count + ' 个', 'warning');
+                            } else {
+                                showToast('爬取完成! 共获取 ' + status.total_comments + ' 条评论', 'success');
+                            }
+                            
+                            // 显示继续按钮
+                            if (status.failed_count > 0 || status.completed_count < status.total_videos) {
+                                continueBtn.style.display = 'inline-block';
+                            }
+                            stopBtn.style.display = 'none';
+                        }
+                    }
+                } catch (e) {
+                    console.error('获取进度失败:', e);
+                }
+            }, 2000);
+        }
+        
+        // 继续爬取
+        document.getElementById('continueBtn').addEventListener('click', async function() {
+            try {
+                var res = await fetch('/api/crawl/continue', { method: 'POST' });
+                var data = await res.json();
+                
+                if (data.success) {
+                    showToast(data.message);
+                    document.getElementById('continueBtn').style.display = 'none';
+                    document.getElementById('stopBtn').style.display = 'inline-block';
+                    crawlBtn.disabled = true;
+                    crawlBtn.textContent = '爬取中...';
+                    startProgressPolling();
+                } else {
+                    showToast(data.detail || '继续失败', 'error');
+                }
+            } catch (e) {
+                showToast('继续爬取出错', 'error');
+            }
+        });
+        
+        // 停止爬取
+        document.getElementById('stopBtn').addEventListener('click', async function() {
+            try {
+                var res = await fetch('/api/crawl/stop', { method: 'POST' });
+                var data = await res.json();
+                
+                if (data.success) {
+                    if (progressInterval) {
+                        clearInterval(progressInterval);
+                        progressInterval = null;
+                    }
+                    showToast('已停止爬取');
+                    crawlBtn.disabled = false;
+                    crawlBtn.textContent = '开始爬取评论';
+                    document.getElementById('stopBtn').style.display = 'none';
+                    document.getElementById('continueBtn').style.display = 'inline-block';
+                }
+            } catch (e) {
+                showToast('停止失败', 'error');
+            }
+        });
+        
+        // 更新统计数据
+        async function updateStats() {
+            try {
+                var videosRes = await fetch('/api/data/videos');
+                var commentsRes = await fetch('/api/data/comments');
+                
+                var videosData = await videosRes.json();
+                var commentsData = await commentsRes.json();
+                
+                videoStat.textContent = videosData.total || 0;
+                commentStat.textContent = commentsData.total || 0;
+            } catch (e) {
+                console.error('更新统计失败:', e);
+            }
+        }
+        
+        // 标签页切换
+        document.querySelectorAll('.tab').forEach(function(tab) {
+            tab.addEventListener('click', function() {
+                document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+                tab.classList.add('active');
+                loadTabData(tab.dataset.tab);
+            });
+        });
+        
+        // 加载标签页数据
+        async function loadTabData(type) {
+            var loading = document.getElementById('dataLoading');
+            loading.classList.add('active');
+            
+            try {
+                var res = await fetch('/api/data/preview?data_type=' + type + '&limit=50');
+                var data = await res.json();
+                
+                if (type === 'videos') {
+                    renderVideosTable(data.data);
+                } else {
+                    renderCommentsTable(data.data);
+                }
+            } catch (e) {
+                showToast('加载数据失败', 'error');
+            } finally {
+                loading.classList.remove('active');
+            }
+        }
+        
+        // 渲染视频表格
+        function renderVideosTable(data) {
+            if (!data || data.length === 0) {
+                tabContent.innerHTML = '<div class="empty-state"><div class="icon"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z" fill="#ccc"/></svg></div><p>暂无视频数据</p></div>';
+                return;
+            }
+            
+            var html = '<table class="data-table"><thead><tr><th>标题</th><th>作者</th><th>点赞</th><th>评论</th><th>发布时间</th></tr></thead><tbody>';
+            
+            data.forEach(function(video) {
+                html += '<tr>' +
+                    '<td>' + (video.title || '-') + '</td>' +
+                    '<td>' + (video.nickname || '-') + '</td>' +
+                    '<td>' + (video.liked_count_str || 0) + '</td>' +
+                    '<td>' + (video.comment_count_str || 0) + '</td>' +
+                    '<td>' + (video.create_time_str || '-') + '</td></tr>';
+            });
+            
+            html += '</tbody></table>';
+            tabContent.innerHTML = html;
+        }
+        
+        // 渲染评论表格
+        function renderCommentsTable(data) {
+            if (!data || data.length === 0) {
+                tabContent.innerHTML = '<div class="empty-state"><div class="icon"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z" fill="#ccc"/></svg></div><p>暂无评论数据</p></div>';
+                return;
+            }
+            
+            var html = '<table class="data-table"><thead><tr><th>视频标题</th><th>评论内容</th><th>用户</th><th>地区</th><th>点赞</th><th>时间</th></tr></thead><tbody>';
+            
+            data.forEach(function(comment) {
+                html += '<tr>' +
+                    '<td>' + (comment.video_title || '-') + '</td>' +
+                    '<td>' + (comment.content || '-') + '</td>' +
+                    '<td>' + (comment.nickname || '-') + '</td>' +
+                    '<td>' + (comment.ip_location || '-') + '</td>' +
+                    '<td>' + (comment.like_count || 0) + '</td>' +
+                    '<td>' + (comment.create_time_str || '-') + '</td></tr>';
+            });
+            
+            html += '</tbody></table>';
+            tabContent.innerHTML = html;
+        }
+        
+        // 回车搜索
+        if (keywordInput) {
+            keywordInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    searchBtn.click();
+                }
+            });
+        }
+        
+        // 初始化
+        checkLoginStatus();
+        recoverProgress();
+    </script>
+</body>
+</html>
