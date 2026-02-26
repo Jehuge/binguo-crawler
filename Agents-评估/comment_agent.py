@@ -167,7 +167,7 @@ def batch_analyze_comments(comments_with_idx, max_retries=3):
             for idx, _ in comments_with_idx]
 
 
-def process_parallel(df, total_workers=4):
+def process_parallel(df, total_workers=4, source_name="全部"):
     """并行处理评论"""
     comments = df['评论内容'].tolist()
     total = len(comments)
@@ -204,6 +204,9 @@ def process_parallel(df, total_workers=4):
                 all_results.extend(results)
                 completed += 1
                 
+                # 每批次完成立即保存
+                _save_results_immediate(all_results, source_name)
+                
                 # 进度显示
                 elapsed = time.time() - start_time
                 rate = completed / elapsed if elapsed > 0 else 0
@@ -212,10 +215,6 @@ def process_parallel(df, total_workers=4):
                 print(f"进度: {completed}/{len(batches)} 批次 "
                       f"({completed*BATCH_SIZE}/{total} 条) "
                       f"预计剩余: {remaining/60:.1f}分钟")
-                
-                # 定期保存
-                if completed % 10 == 0:
-                    _save_temp_results(all_results, total)
                     
             except Exception as e:
                 print(f"批次 {batch_idx} 处理异常: {e}")
@@ -242,11 +241,31 @@ def _save_temp_results(results, total):
     df_temp.to_csv(temp_file, index=False, encoding='utf-8-sig')
 
 
-def analyze_all_comments(df):
+def _save_results_immediate(results, source_name="全部"):
+    """每批次完成后立即保存结果"""
+    if not results:
+        return
+    
+    # 创建临时DataFrame用于保存
+    df_temp = pd.DataFrame(results)
+    
+    # 生成临时文件名
+    if source_name:
+        temp_excel = os.path.join(OUTPUT_DIR, f"分析结果_{source_name}_temp.xlsx")
+        temp_csv = os.path.join(OUTPUT_DIR, f"分析结果_{source_name}_temp.csv")
+    else:
+        temp_excel = os.path.join(OUTPUT_DIR, "分析结果_temp.xlsx")
+        temp_csv = os.path.join(OUTPUT_DIR, "分析结果_temp.csv")
+    
+    df_temp.to_excel(temp_excel, index=False)
+    df_temp.to_csv(temp_csv, index=False, encoding='utf-8-sig')
+
+
+def analyze_all_comments(df, source_name="全部"):
     """分析所有评论的主函数"""
     # 优先尝试并行处理
     try:
-        results = process_parallel(df, MAX_WORKERS)
+        results = process_parallel(df, MAX_WORKERS, source_name)
     except Exception as e:
         print(f"并行处理失败: {e}")
         print("改用串行处理...")
@@ -259,10 +278,11 @@ def analyze_all_comments(df):
             batch = [(i + j, comments[i + j]) for j in range(min(BATCH_SIZE, len(comments) - i))]
             batch_results = batch_analyze_comments(batch)
             results.extend(batch_results)
-            print(f"进度: {min(i+BATCH_SIZE, len(comments))}/{len(comments)}")
             
-            if (i // BATCH_SIZE + 1) % 5 == 0:
-                _save_temp_results(results, len(comments))
+            # 每批次完成立即保存
+            _save_results_immediate(results, source_name)
+            
+            print(f"进度: {min(i+BATCH_SIZE, len(comments))}/{len(comments)}")
     
     return results
 
@@ -537,7 +557,7 @@ def main():
     df = load_data(limit=MAX_COMMENTS, source=source)
     
     # 分析评论
-    results = analyze_all_comments(df)
+    results = analyze_all_comments(df, source_name=source_name)
     
     # 保存结果（分开保存）
     df_output = save_results(df, results, source_name=source_name)
