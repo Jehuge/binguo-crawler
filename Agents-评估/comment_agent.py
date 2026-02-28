@@ -1,72 +1,99 @@
 #!/usr/bin/env python3
 """
-评论分析Agent - 修复版
-修复了增量保存时丢失原始评论内容的问题
+评论分析Agent
 支持批量并行处理，每批次自动合并原始数据并追加保存
+技术维度多列展开：智驾/续航/动力/底盘/能耗/空间/内饰/外观/音响/充电/安全/舒适
+技术点摘要列由Python派生（零幻觉）
 """
 import pandas as pd
 import json
 import os
 import time
 import re
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import ollama
 
 # ============== 配置 ==============
-DATA_DIR = ""  # 请输入数据文件所在目录，留空代表当前目录
-OUTPUT_DIR = "" # 请输入结果输出目录，留空代表当前目录
-MODEL_NAME = "hf.co/unsloth/Qwen3-4B-GGUF:Q6_K"  # 用户指定模型
-OLLAMA_MODEL = None  # 实际调用的模型名（自动匹配）
+DATA_DIR = ""   # 数据文件所在目录，留空代表当前目录
+OUTPUT_DIR = "" # 结果输出目录，留空代表当前目录
+MODEL_NAME = "hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M"
+# MODEL_NAME = "hf.co/unsloth/Qwen3-4B-GGUF:Q6_K"
+OLLAMA_MODEL = None
 
-# 并行配置 - 针对 RTX 5070 12GB 显存优化
-# 4B 模型(Q6_K)约占用 3.5GB 显存，12GB 显存非常充裕，可大幅提升并发与批次
-MAX_WORKERS = 6   # 5070 算力强劲，提高并行线程数榨干 GPU (建议 6-10)
-BATCH_SIZE = 10   # 减小批次防止 num_ctx 截断，Qwen3 思维链会消耗额外 token (建议 10-15)
+# ============================================================
+# 性能配置（RTX 5070 12GB 评估）
+# ============================================================
+# 模型显存占用:
+#   Qwen3-4B Q6_K   ≈ 3.5GB 权重
+#   Qwen3-8B Q4_K_M ≈ 5.5GB 权重
+#
+# KV Cache（num_ctx=8192，单请求）:
+#   Qwen3-4B ≈ 0.4GB  → 剩余 8.5GB / 0.4 ≈ 可跑 ~20 路（瓶颈在调度，取 8）
+#   Qwen3-8B ≈ 0.8GB  → 剩余 6.5GB / 0.8 ≈ 可跑  ~8 路（建议取 4）
+#
+# 注意：BATCH_SIZE=5 时每批输出约 800 tokens（16 字段×5条），
+# num_ctx=8192 完全够用，无需 16384（节省 KV 显存提升并发）
+#
+# 推荐:  4B 模型 → MAX_WORKERS=8, BATCH_SIZE=5
+#        8B 模型 → MAX_WORKERS=4, BATCH_SIZE=5
+# ============================================================
 
-# 测试配置：限制数据条数（方便测试）
-# 设为 None 则处理全部数据
-MAX_COMMENTS = None  # 例如: 100, 1000, 26050, None
+MAX_WORKERS = 8
+# 7维度精简后每批输出量大幅减少：10条×(4基础+7维度) ≈ 640 output tokens
+# 500字×10条输入 ≈ 3500 tokens + prompt 500 + output 640 = ~4640，8192完全够用
+BATCH_SIZE  = 5      # 10条/批（长评论500字+7维度，8192内安全）
+NUM_CTX     = 8192   # 7维度精简后恢复8192，节省每请求~0.5GB KV显存，并发更高
+
+MAX_COMMENTS = None  # 限制处理条数，None=全部
+
+# ============== 技术维度定义 ==============
+# 每个维度在输出中独立成列，值为：正面 / 负面 / 未涉及
+# 合并逻辑：续航+能耗+充电→续航补能；底盘+舒适+音响→驾乘体验；外观+内饰→外观内饰
+# 维度合并精简为6个
+TECH_DIMS = ['智驾', '续航补能', '动力', '驾乘体验', '空间', '外观内饰']
+TECH_DIM_DESCS = [dim + '点' for dim in TECH_DIMS]
 
 # ============== 提示词模板 ==============
-BATCH_ANALYSIS_PROMPT = """你是一个专业的汽车评论分析助手。请批量分析以下评论，对每条评论输出6个字段。
+# 维度字段默认"未涉及"，技术点描述字段默认""
+_TECH_JSON_FIELDS = (
+    ",".join(f'"{d}":"无"' for d in TECH_DIMS) + "," +
+    ",".join(f'"{d}":""' for d in TECH_DIM_DESCS)
+)
 
-【字段定义】
-1. 有效无效：
-   - 无效：纯表情符号、无意义乱码、单字或极短重复内容（如"哈哈哈"、"666"、"？"）
-   - 有效：其余所有含实质内容的评论
+BATCH_ANALYSIS_PROMPT = """批量分析以下汽车评论，每条输出指定字段。
 
-2. 正负面：正面 / 负面 / 中性
-   - 正面：对车辆、品牌、服务表达肯定、赞美、推荐
-   - 负面：表达批评、抱怨、失望、质疑
-   - 中性：陈述事实、提问、比较、无明显倾向
+基础字段：
+- 有效无效：有效/无效（纯表情/乱码/无意义重复→无效）
+- 正负面：正面/负面/中性
+- 营销手段：是/否（广告/软文/引流/水军→是）
+- 技术亮点：是/否（主动描述技术特性→是；仅提问/闲聊→否）
 
-3. 营销手段：是 / 否
-   - 是：含广告推广、引流二维码、软文种草、托儿水军特征、夸张宣传等
-   - 否：普通用户真实评论
+技术维度（值只能是：正面/负面/中性/无）：  # 优化为包含中性
+- 智驾：辅助驾驶/NOA/领航/自动泊车/变道辅助
+- 续航补能：续航里程/CLTC/电耗/充电速度/快充/补能
+- 动力：加速/提速/扭矩/马力/动力响应
+- 驾乘体验：底盘/悬挂/NVH/隔音/音响/乘坐舒适
+- 空间：前后排/头腿部空间/后备箱
+- 外观内饰：外观设计/内饰材质/做工/中控屏/HUD/座椅
 
-4. 技术亮点：是 / 否
-   - 是：评论中主动描述、评价了具体技术特性（如续航、智驾、底盘、动力、能耗、空间、音响等）
-   - 否：仅提问（"这车续航多少？"）、闲聊、或未涉及技术内容
+技术点描述（对应6维度，简短描述评论对该维度的具体观点或问题，未提及填""）：
+字段：智驾点/续航补能点/动力点/驾乘体验点/空间点/外观内饰点
+- 要写具体观点，而非仅列关键词：如"智驾多次出错"而非"智能辅助驾驶"；"实测续航只有标称70%"而非"续航"
+- 内容来自评论原文，不得添加未出现的信息
 
-5. 营销点：仅当"营销手段=是"时填写，列出评论中的营销内容要点（逗号分隔）；否则留空""
+判定规则：
+1. 原文有明确正/负态度→正面或负面；仅提问→无；未提及→无；态度含糊或中立→中性
+2. 禁止凭车型/品牌常识推断；禁止因整体正面把所有维度填正面
+3. 不确定→无（宁缺勿多）
+4. 若某维度技术点描述非空，该维度值必须为正面、负面或中性，不得为无
 
-6. 技术点：仅当"技术亮点=是"时填写，列出评论提及的技术项目及简评（逗号分隔，如"智驾-体验好、续航-虚标严重"）；否则留空""
-
-评论列表（格式：序号|评论内容）：
+评论列表（序号|内容）：
 {comments}
 
-【重要规则】
-- 技术点、营销点必须严格来自评论原文，禁止添加原文未提及的内容
-- 仅提问（如"这车续航多少？"）不算技术亮点，技术亮点=否
-- 若"营销手段=否"，营销点必须为空字符串""
-- 若"技术亮点=否"，技术点必须为空字符串""
+仅返回JSON数组，不含其他内容：
+[{{"序号":N,"有效无效":"","正负面":"","营销手段":"","技术亮点":"",""" + _TECH_JSON_FIELDS + """}}]
+/no_think"""
 
-请以JSON数组格式返回，每条评论对应一个对象，严格按以下格式（序号为示例，内容从原文提取）：
-[
-  {{"序号":N,"有效无效":"有效/无效","正负面":"正面/负面/中性","营销手段":"是/否","技术亮点":"是/否","营销点":"原文营销内容摘要或空字符串","技术点":"原文技术内容摘要或空字符串"}}
-]
-只返回JSON数组，不要其他内容。/no_think"""
 
 def load_data(limit=None, source=None):
     """加载指定来源的评论数据"""
@@ -76,33 +103,30 @@ def load_data(limit=None, source=None):
     all_data = []
     sources_info = []
 
-    # 读取懂车帝评论
     if source is None or source == 'dongche':
         file_path = os.path.join(DATA_DIR, "懂车帝评论.xlsx")
         if os.path.exists(file_path):
-            xlsx_dongche = pd.ExcelFile(file_path)
-            print(f"\n[懂车帝] 共{len(xlsx_dongche.sheet_names)}个sheet:")
-            for sheet in xlsx_dongche.sheet_names:
-                df = xlsx_dongche.parse(sheet)
+            xlsx = pd.ExcelFile(file_path)
+            print(f"\n[懂车帝] 共{len(xlsx.sheet_names)}个sheet:")
+            for sheet in xlsx.sheet_names:
+                df = xlsx.parse(sheet)
                 df['车型'] = sheet.strip()
                 df['来源'] = '懂车帝'
                 all_data.append(df)
                 print(f"   {sheet}: {len(df)} 条")
-            sources_info.append(('懂车帝', len(xlsx_dongche.sheet_names)))
+            sources_info.append(('懂车帝', len(xlsx.sheet_names)))
         else:
             print(f"\n[警告] 未找到文件: {file_path}")
 
-    # 读取抖音评论
     if source is None or source == 'douyin':
         file_path = os.path.join(DATA_DIR, "抖音评论.xlsx")
         if os.path.exists(file_path):
-            xlsx_douyin = pd.ExcelFile(file_path)
-            print(f"\n[抖音] 共{len(xlsx_douyin.sheet_names)}个sheet:")
-            for sheet in xlsx_douyin.sheet_names:
-                df = xlsx_douyin.parse(sheet)
+            xlsx = pd.ExcelFile(file_path)
+            print(f"\n[抖音] 共{len(xlsx.sheet_names)}个sheet:")
+            for sheet in xlsx.sheet_names:
+                df = xlsx.parse(sheet)
                 df['车型'] = sheet.strip()
                 df['来源'] = '抖音'
-                # 清理无用列
                 cols = ['昵称', '评论内容']
                 if '地区' in df.columns: cols.append('地区')
                 if '点赞数' in df.columns: cols.append('点赞数')
@@ -110,7 +134,7 @@ def load_data(limit=None, source=None):
                 df = df[cols + ['车型', '来源']]
                 all_data.append(df)
                 print(f"   {sheet}: {len(df)} 条")
-            sources_info.append(('抖音', len(xlsx_douyin.sheet_names)))
+            sources_info.append(('抖音', len(xlsx.sheet_names)))
         else:
             print(f"\n[警告] 未找到文件: {file_path}")
 
@@ -118,16 +142,10 @@ def load_data(limit=None, source=None):
         print("未加载到任何数据，请检查文件路径。")
         return pd.DataFrame()
 
-    # 合并所有数据
     df = pd.concat(all_data, ignore_index=True)
-    
-    # 清洗评论内容
     df['评论内容'] = df['评论内容'].fillna('').astype(str).str.strip()
-    # 过滤空评论
-    df = df[df['评论内容'] != '']
-    df = df.reset_index(drop=True)
+    df = df[df['评论内容'] != ''].reset_index(drop=True)
 
-    # 限制数据条数
     total_original = len(df)
     if limit and limit < total_original:
         df = df.head(limit)
@@ -143,289 +161,386 @@ def load_data(limit=None, source=None):
     print("="*60)
     return df
 
-def batch_analyze_comments(comments_with_idx, max_retries=3):
-    """
-    批量分析评论 - 使用单次调用分析多条评论
-    comments_with_idx: [(index, comment), ...]
-    """
-    # 格式化评论列表
-    comments_text = "\n".join([f"{idx}|{comment[:200]}" for idx, comment in comments_with_idx])
-    
-    for attempt in range(max_retries):
-        try:
-            response = ollama.chat(
-                model=OLLAMA_MODEL,
-                messages=[{
-                    'role': 'user',
-                    'content': BATCH_ANALYSIS_PROMPT.format(comments=comments_text)
-                }],
-                options={
-                    'temperature': 0.1,
-                    'num_ctx': 16384,  # 增大上下文，防止 JSON 被截断
-                }
-            )
-            result_text = response['message']['content'].strip()
-            
-            # 【关键修复】剥离 Qwen3 思维链 <think>...</think> 块
-            # Qwen3 是 Reasoning 模型，会先输出推理过程，再输出实际内容
-            result_text = re.sub(r'<think>[\s\S]*?</think>', '', result_text).strip()
-            
-            # 提取JSON数组
-            json_match = re.search(r'\[[\s\S]*\]', result_text)
-            if json_match:
-                results = json.loads(json_match.group())
-                return results
-            else:
-                # 如果还是找不到JSON，打印前200字符用于调试
-                print(f"  [调试] 未找到JSON，模型原始输出: {result_text[:200]}")
-        except Exception as e:
-            print(f"  批次分析失败 (尝试 {attempt+1}/{max_retries}): {e}")
-            time.sleep(2)
 
-    # 如果全部失败，返回失败标记
-    return [{"序号": idx, "有效无效": "未知", "正负面": "中性", 
-             "营销手段": "否", "技术亮点": "否", "营销点": "", "技术点": "分析失败"} 
-            for idx, _ in comments_with_idx]
+def sanitize_comment(comment: str, max_len: int = 500) -> str:
+    """净化评论文本，避免特殊字符破坏模型输出的 JSON 结构
+    max_len=500 覆盖长篇评论（200字被截断会丢失技术信息）
+    如果评论数据普遍极短，可调低以提升批次吞吐量
+    """
+    text = comment[:max_len]
+    text = text.replace('"', '\u201c').replace('\u201d', '\u201c').replace('"', '\u201c')
+    text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    text = text.replace('\\', '/')
+    return text.strip()
+
+
+def repair_json(text: str):
+    """尝试修复常见 JSON 格式错误后重新解析"""
+    match = re.search(r'\[[\s\S]*\]', text)
+    if not match:
+        return None
+    raw = match.group()
+    raw = re.sub(r'(?<=: ")(.*?)(?=")', lambda m: m.group().replace('\n', ' ').replace('\r', ' '), raw)
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    results = []
+    for obj_str in re.finditer(r'\{[^{}]*\}', raw):
+        try:
+            results.append(json.loads(obj_str.group()))
+        except Exception:
+            pass
+    return results if results else None
+
+
+def build_tech_summary(rec: dict) -> str:
+    """
+    拼接各维度技术点描述字段，生成技术点摘要。
+    内容直接来自评论原文的技术描述，反映实际提及的技术点。
+    示例: "NOA表现不错；CLTC400实测只有280km；底盘隔振一般"
+    """
+    parts = []
+    for dim in TECH_DIMS:
+        desc = rec.get(dim + '点', '').strip()
+        if desc:
+            parts.append(desc)
+    return '；'.join(parts)
+
+
+def post_process_results(results: list) -> list:
+    """
+    结果后处理（Python端校验，不依赖模型）:
+    1. 标准化维度值（只保留合法值，其他归一为未涉及）
+    2. 拼接技术点摘要（来自模型输出的描述字段）
+    3. 自动修正矛盾: 维度有值 但 技术亮点=否 → 改为是
+    4. 自动修正矛盾: 技术亮点=是 但 所有维度=未涉及 → 改为否
+    """
+    valid_dim_values = {'正面', '负面', '中性', '无'}
+    for rec in results:
+        # 标准化维度值，防止模型输出非法值
+        for dim in TECH_DIMS:
+            if rec.get(dim) not in valid_dim_values:
+                rec[dim] = '无'
+
+        # 一致性修正：desc非空但dim=无时，将dim设为整体正负面或中性（兜底）
+        overall = rec.get('正负面', '中性')
+        fallback = '正面' if overall == '正面' else ('负面' if overall == '负面' else '中性')
+        for dim in TECH_DIMS:
+            if rec.get(dim + '点', '').strip() and rec.get(dim) == '无':
+                rec[dim] = fallback
+
+        rec['技术点摘要'] = build_tech_summary(rec)
+
+        # has_tech：维度有情感值 或 有非空描述（两者取或，避免模型漏填维度值）
+        has_tech = (
+            any(rec.get(dim) in ('正面', '负面', '中性') for dim in TECH_DIMS) or
+            any(rec.get(dim + '点', '').strip() for dim in TECH_DIMS)
+        )
+        if has_tech and rec.get('技术亮点') == '否':
+            rec['技术亮点'] = '是'
+        elif not has_tech and rec.get('技术亮点') == '是':
+            rec['技术亮点'] = '否'
+    return results
+
+
+def make_fail_record(idx):
+    """生成失败占位记录（含所有输出字段，防止merge后出现空列）"""
+    rec = {
+        "序号": idx, "有效无效": "未知", "正负面": "中性",
+        "营销手段": "否", "技术亮点": "否", "技术点摘要": ""
+    }
+    for dim in TECH_DIMS:
+        rec[dim] = "无"
+    for dim_desc in TECH_DIM_DESCS:
+        rec[dim_desc] = ""
+    return rec
+
+
+def _call_model_once(comments_with_idx) -> list | None:
+    """调用模型一次，返回解析后的结果列表，失败返回None"""
+    comments_text = "\n".join(
+        f"{idx}|{sanitize_comment(comment)}" for idx, comment in comments_with_idx
+    )
+    try:
+        response = ollama.chat(
+            model=OLLAMA_MODEL,
+            messages=[{'role': 'user',
+                        'content': BATCH_ANALYSIS_PROMPT.format(comments=comments_text)}],
+            options={'temperature': 0.1, 'num_ctx': NUM_CTX},
+        )
+        result_text = response['message']['content'].strip()
+        result_text = re.sub(r'<think>[\s\S]*?</think>', '', result_text).strip()
+        json_match = re.search(r'\[[\s\S]*\]', result_text)
+        if not json_match:
+            print(f"  [调试] 未找到JSON，模型输出: {result_text[:200]}")
+            return None
+        try:
+            return json.loads(json_match.group())
+        except Exception:
+            return repair_json(result_text)
+    except Exception as e:
+        print(f"  模型调用异常: {e}")
+        return None
+
+
+def batch_analyze_comments(comments_with_idx, max_retries=3):
+    """批量分析评论。
+    若模型漏输出某些条目（小模型批量时常见），对缺失条目逐条单独重试。
+    根本原因：同批含超长评论时，小模型注意力偏移，漏输出短评论。
+    """
+    for attempt in range(max_retries):
+        raw = _call_model_once(comments_with_idx)
+        if raw:
+            results = post_process_results(raw)
+            # 检测漏输出的条目
+            returned_idxs = {r.get('序号') for r in results}
+            missing = [(idx, c) for idx, c in comments_with_idx if idx not in returned_idxs]
+            if missing:
+                print(f"  [补漏] 批次漏输出 {len(missing)} 条，逐条单独重试...")
+                for item in missing:
+                    # 单条重试2次，仍失败则用占位记录
+                    single_raw = None
+                    for _ in range(2):
+                        single_raw = _call_model_once([item])
+                        if single_raw:
+                            break
+                        time.sleep(1)
+                    if single_raw:
+                        results.extend(post_process_results(single_raw))
+                    else:
+                        results.append(make_fail_record(item[0]))
+            return results
+
+        print(f"  批次分析失败 (尝试 {attempt+1}/{max_retries})")
+        time.sleep(2)
+
+    return [make_fail_record(idx) for idx, _ in comments_with_idx]
+
+
+def _build_cols():
+    """动态构建输出列顺序"""
+    base = ['序号', '昵称', '评论内容', '来源', '车型', '评论时间', '点赞数',
+            '有效无效', '正负面', '营销手段', '技术亮点']
+    suffix = TECH_DIMS + TECH_DIM_DESCS + ['技术点摘要']
+    return base + suffix
+
+
 
 def save_incremental_csv(df_original, batch_results, source_name="全部"):
-    """
-    【核心修复】
-    将新的一批分析结果与原始数据合并后，追加到CSV文件中
-    """
+    """将新的一批分析结果与原始数据合并后追加到CSV 和增量XLSX"""
     if not batch_results:
         return
-        
-    # 1. 将分析结果转为 DataFrame
+
     df_analysis = pd.DataFrame(batch_results)
-    
-    # 2. 根据分析结果中的'序号'，从原始 df_original 中提取对应的行
-    # 注意：这里假设 df_original 的索引就是序号（我们在 load_data 中 reset_index 过了）
     target_indices = [item['序号'] for item in batch_results]
-    
-    # 提取原始数据的子集
+
+    # 确保target_indices是整数索引且对应df_original行，不要重置序号导致车型错位
     df_subset = df_original.iloc[target_indices].copy()
-    
-    # 确保子集里有'序号'列用于合并
-    df_subset['序号'] = df_subset.index
-    
-    # 3. 合并：原始数据 + 分析结果
+
+    # 切忌这里不要重置序号，保持原始索引序号，避免车型字段跟序号错位问题
+    # df_subset['序号'] = df_subset.index   # 此行为潜在问题，注释掉
+
+    df_subset['序号'] = target_indices  # 明确赋予调用传递的序号号
+
     df_merged = pd.merge(df_subset, df_analysis, on='序号', how='left')
-    
-    # 4. 整理列顺序（保证美观）
-    cols = ['序号', '昵称', '评论内容', '来源', '车型', '评论时间', '点赞数', 
-            '有效无效', '正负面', '营销手段', '技术亮点', '营销点', '技术点']
-    
-    # 动态插入其他可能存在的列（如地区）
+
+    cols = _build_cols()
     if '地区' in df_merged.columns:
         cols.insert(6, '地区')
-        
-    # 只保留存在的列
     final_cols = [c for c in cols if c in df_merged.columns]
     df_final = df_merged[final_cols]
-    
-    # 5. 追加写入 CSV
+
     csv_file = os.path.join(OUTPUT_DIR, f"评论分析结果_{source_name}.csv")
     file_exists = os.path.isfile(csv_file)
-    
-    # 如果文件不存在，写入表头；如果存在，不写表头，直接追加模式(mode='a')
     df_final.to_csv(csv_file, mode='a', header=not file_exists, index=False, encoding='utf-8-sig')
 
+    # 增量保存XLSX，追加写入，避免整个任务中断时丢失数据
+    xlsx_file = os.path.join(OUTPUT_DIR, f"评论分析结果_{source_name}_incremental.xlsx")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if os.path.exists(xlsx_file):
+                # 读取已存在文件，追加数据
+                existing = pd.read_excel(xlsx_file, engine='openpyxl')
+                combined = pd.concat([existing, df_final], ignore_index=True).drop_duplicates(subset=['序号'])
+            else:
+                combined = df_final
+            combined.to_excel(xlsx_file, index=False, engine='openpyxl')
+            print(f"[增量保存] XLSX已保存: {xlsx_file}")
+            break
+        except PermissionError:
+            print(f"[警告] 第{attempt+1}次尝试，XLSX保存失败，文件被占用: {xlsx_file}")
+            time.sleep(2)
+        except Exception as e:
+            print(f"[错误] XLSX增量保存异常: {e}")
+            break
+
+
 def process_parallel(df, total_workers=4, source_name="全部"):
-    """并行处理评论 - 优化版（实时增量追加+合并原始数据）"""
+    """并行处理评论"""
     comments = df['评论内容'].tolist()
     total = len(comments)
-    
+
     print(f"\n开始并行分析，共 {total} 条评论")
-    print(f"使用模型: {OLLAMA_MODEL}, 并行线程: {total_workers}")
-    print(f"每批处理: {BATCH_SIZE} 条")
-    print(f"保存策略: 每处理完一批，立即合并原始数据并追加保存")
+    print(f"使用模型: {OLLAMA_MODEL}, 并行线程: {total_workers}, 每批: {BATCH_SIZE} 条, num_ctx: {NUM_CTX}")
+    print(f"技术维度: {', '.join(TECH_DIMS)}")
     print("="*60)
 
-    # 清理旧文件，防止追加到错误的数据文件
     csv_file = os.path.join(OUTPUT_DIR, f"评论分析结果_{source_name}.csv")
     if os.path.exists(csv_file):
         try:
-            os.remove(csv_file)
-            print(f"已清理旧文件: {csv_file}")
+            # 先备份旧文件，防止数据意外丢失
+            backup_file = csv_file + ".backup_" + time.strftime("%Y%m%d%H%M%S")
+            os.rename(csv_file, backup_file)
+            print(f"已备份旧csv文件: {csv_file} -> {backup_file}")
         except Exception as e:
-            print(f"警告: 无法清理旧文件 {csv_file}: {e}")
+            print(f"警告: 无法备份旧csv文件: {e}")
+            try:
+                os.remove(csv_file)
+                print(f"已清理旧文件: {csv_file}")
+            except Exception as e2:
+                print(f"警告: 无法清理旧文件: {e2}")
 
-    # 准备批次
     batches = []
     for i in range(0, total, BATCH_SIZE):
         batch = [(i + j, comments[i + j]) for j in range(min(BATCH_SIZE, total - i))]
         batches.append(batch)
-    
+
     print(f"共分为 {len(batches)} 个批次")
 
-    all_results = []  
+    all_results = []
     completed = 0
     failed_batches = []
-    
     start_time = time.time()
 
-    # 使用线程池并行处理
     with ThreadPoolExecutor(max_workers=total_workers) as executor:
-        future_to_batch = {executor.submit(batch_analyze_comments, batch): i 
+        future_to_batch = {executor.submit(batch_analyze_comments, batch): i
                           for i, batch in enumerate(batches)}
-        
+
         for future in as_completed(future_to_batch):
             batch_idx = future_to_batch[future]
             try:
-                # results 是当前批次的分析结果（只有序号和分析字段）
                 results = future.result()
-                
-                # 1. 加入内存全量列表
                 all_results.extend(results)
                 completed += 1
-                
-                # 2. 【核心修复】增量保存时传入 df (原始数据)，以便合并
                 save_incremental_csv(df, results, source_name)
-                
-                # 进度显示
+
                 elapsed = time.time() - start_time
                 rate = completed / elapsed if elapsed > 0 else 0
                 remaining = (len(batches) - completed) / rate if rate > 0 else 0
-                
                 print(f"进度: {completed}/{len(batches)} 批次 | "
                       f"已保存: {len(all_results)} 条 | "
                       f"预计剩余: {remaining/60:.1f}分钟")
-                
+
             except Exception as e:
                 print(f"批次 {batch_idx} 处理异常: {e}")
                 failed_batches.append(batch_idx)
 
-    # 处理失败的批次（串行重试）
     if failed_batches:
         print(f"\n重试失败的 {len(failed_batches)} 个批次...")
         for batch_idx in failed_batches:
-            batch = batches[batch_idx]
-            results = batch_analyze_comments(batch, max_retries=5)
+            results = batch_analyze_comments(batches[batch_idx], max_retries=5)
             all_results.extend(results)
-            # 重试成功也追加上去
             save_incremental_csv(df, results, source_name)
 
-    # 按序号排序
     all_results.sort(key=lambda x: x.get('序号', 0))
     return all_results
 
+
 def analyze_all_comments(df, source_name="全部"):
     """分析所有评论的主函数"""
-    # 优先尝试并行处理
     try:
-        results = process_parallel(df, MAX_WORKERS, source_name)
+        return process_parallel(df, MAX_WORKERS, source_name)
     except Exception as e:
-        print(f"并行处理失败: {e}")
-        print("改用串行处理...")
-        
-        # 串行模式也要清理文件
+        print(f"并行处理失败: {e}，改用串行...")
         csv_file = os.path.join(OUTPUT_DIR, f"评论分析结果_{source_name}.csv")
         if os.path.exists(csv_file):
-            try:
-                os.remove(csv_file)
+            try: os.remove(csv_file)
             except: pass
 
-        # 串行备用方案
         results = []
         comments = df['评论内容'].tolist()
-        
         for i in range(0, len(comments), BATCH_SIZE):
             batch = [(i + j, comments[i + j]) for j in range(min(BATCH_SIZE, len(comments) - i))]
             batch_results = batch_analyze_comments(batch)
             results.extend(batch_results)
-            
-            # 串行模式下也立即保存（传入df）
             save_incremental_csv(df, batch_results, source_name)
-            
             print(f"进度: {min(i+BATCH_SIZE, len(comments))}/{len(comments)}")
-            
-    return results
+        return results
+
 
 def save_results(df_original, results, source_name="全部"):
     """保存最终汇总结果（全量备份）"""
     print("\n" + "="*60)
     print("保存最终汇总结果...")
     print("="*60)
-    
-    # 创建结果DataFrame
+
     df_results = pd.DataFrame(results)
-    
-    # 合并原始数据
     df_original = df_original.copy()
     df_original['序号'] = range(len(df_original))
-    
-    df_output = pd.merge(df_original, df_results, left_on='序号', right_on='序号', how='left')
-    
-    # 重新排列列
-    cols = ['序号', '昵称', '评论内容', '来源', '车型', '评论时间', '点赞数', 
-            '有效无效', '正负面', '营销手段', '技术亮点', '营销点', '技术点']
-    
+
+    df_output = pd.merge(df_original, df_results, on='序号', how='left')
+
+    cols = _build_cols()
     if '地区' in df_output.columns:
         cols.insert(6, '地区')
-        
     cols = [c for c in cols if c in df_output.columns]
     df_output = df_output[cols]
 
-    # 生成文件名
     safe_name = source_name.replace(" ", "_").replace("+", "_")
+
     output_file = os.path.join(OUTPUT_DIR, f"评论分析结果_{safe_name}.xlsx")
-    
-    # 保存 Excel
-    df_output.to_excel(output_file, index=False, engine='openpyxl')
-    print(f"Excel已保存: {output_file}")
-    
-    # 保存 CSV (全量覆盖)
+    try:
+        df_output.to_excel(output_file, index=False, engine='openpyxl')
+        print(f"Excel已保存: {output_file}")
+    except PermissionError:
+        print(f"[警告] Excel文件被占用，跳过Excel保存（CSV已保存）: {output_file}")
+
     csv_file = os.path.join(OUTPUT_DIR, f"评论分析结果_{safe_name}.csv")
     df_output.to_csv(csv_file, index=False, encoding='utf-8-sig')
     print(f"CSV已保存: {csv_file}")
-    
+
     return df_output
+
 
 def generate_statistics(df_results):
     """生成统计报告"""
     print("\n" + "="*60)
     print("[统计] 分析结果统计")
     print("="*60)
-    
+
     total = len(df_results)
     if total == 0:
         return
 
-    # 有效无效
-    print("\n[1] 有效无效分布:")
-    if '有效无效' in df_results:
-        valid_counts = df_results['有效无效'].value_counts()
-        for k, v in valid_counts.items():
-            print(f"    {k}: {v} ({v/total*100:.1f}%)")
+    for label, col in [("有效无效", '有效无效'), ("正负面", '正负面'),
+                        ("营销手段", '营销手段'), ("技术亮点", '技术亮点')]:
+        print(f"\n[{label}]:")
+        if col in df_results.columns:
+            for k, v in df_results[col].value_counts().items():
+                print(f"    {k}: {v} ({v/total*100:.1f}%)")
 
-    # 正负面
-    print("\n[2] 正负面分布:")
-    if '正负面' in df_results:
-        sentiment_counts = df_results['正负面'].value_counts()
-        for k, v in sentiment_counts.items():
-            print(f"    {k}: {v} ({v/total*100:.1f}%)")
-
-    # 营销手段
-    print("\n[3] 营销手段分布:")
-    if '营销手段' in df_results:
-        marketing_counts = df_results['营销手段'].value_counts()
-        for k, v in marketing_counts.items():
-            print(f"    {k}: {v} ({v/total*100:.1f}%)")
-
-    # 技术亮点
-    print("\n[4] 技术亮点分布:")
-    if '技术亮点' in df_results:
-        tech_counts = df_results['技术亮点'].value_counts()
-        for k, v in tech_counts.items():
-            print(f"    {k}: {v} ({v/total*100:.1f}%)")
-        
-    # 交叉分析
-    if '有效无效' in df_results and '正负面' in df_results:
-        print("\n[5] 交叉分析:")
+    print("\n[技术维度涉及率（有效评论）]:")
+    if '有效无效' in df_results.columns:
         valid_df = df_results[df_results['有效无效'] == '有效']
-        print(f"  有效评论中正负面分布:")
+        v_total = len(valid_df)
+        if v_total > 0:
+            for dim in TECH_DIMS:
+                if dim in valid_df.columns:
+                    pos = (valid_df[dim] == '正面').sum()
+                    neg = (valid_df[dim] == '负面').sum()
+                    mentioned = pos + neg
+                    if mentioned > 0:
+                        print(f"    {dim}: 提及{mentioned}条({mentioned/v_total*100:.1f}%) "
+                              f"| 正面{pos} 负面{neg}")
+
+    if '有效无效' in df_results.columns and '正负面' in df_results.columns:
+        print("\n[有效评论中正负面分布]:")
+        valid_df = df_results[df_results['有效无效'] == '有效']
         for k, v in valid_df['正负面'].value_counts().items():
             print(f"    {k}: {v} ({v/len(valid_df)*100:.1f}%)")
+
 
 def check_ollama():
     """检查ollama状态"""
@@ -435,113 +550,91 @@ def check_ollama():
     print("="*60)
     try:
         models = ollama.list()
-        
-        # 兼容不同版本的返回格式
         if hasattr(models, 'get'):
             model_list = models.get('models', [])
         elif hasattr(models, 'models'):
             model_list = models.models
         else:
             model_list = []
-            
+
         available_models = []
         for m in model_list:
             name = m.get('name', m.get('model', ''))
             if name:
                 available_models.append(name)
-                
+
         if not available_models:
-            print("[警告] 未找到已下载的模型")
-            print(f"请运行: ollama pull {MODEL_NAME}")
+            print(f"[警告] 未找到已下载的模型，请运行: ollama pull {MODEL_NAME}")
             return False
-            
-        print(f"[OK] Ollama 服务正常运行")
+
+        print(f"[OK] Ollama 服务正常")
         print(f"[OK] 可用模型: {available_models}")
-        
-        # 查找目标模型
+
         matched_model = None
         for m in available_models:
             if MODEL_NAME in m or m in MODEL_NAME:
                 matched_model = m
                 break
-        
+
         if matched_model:
             OLLAMA_MODEL = matched_model
-            print(f"[OK] 目标模型 '{MODEL_NAME}' 匹配到: {OLLAMA_MODEL}")
+            print(f"[OK] 匹配到模型: {OLLAMA_MODEL}")
             return True
         else:
-            print(f"\n[警告] 未找到模型 '{MODEL_NAME}'")
-            print(f"请运行: ollama pull {MODEL_NAME}")
-            print(f"或修改脚本中的 MODEL_NAME 为可用模型")
+            print(f"\n[警告] 未找到模型 '{MODEL_NAME}'，请运行: ollama pull {MODEL_NAME}")
             return False
 
     except Exception as e:
         print(f"[错误] 无法连接Ollama服务: {e}")
-        print("\n请确保Ollama服务已启动:")
-        print("  macOS: ollama serve")
-        print("  或点击Ollama应用")
+        print("请先启动Ollama: ollama serve")
         return False
+
 
 def main():
     """主函数"""
     print("\n" + "="*60)
-    print("[评论分析 Agent - 修复版]")
+    print("[评论分析 Agent]")
     print("="*60)
-    
-    # 尝试预读取文件获取数量
+
     dongche_count = 0
     douyin_count = 0
     try:
-        f_dongche = os.path.join(DATA_DIR, "懂车帝评论.xlsx")
-        if os.path.exists(f_dongche):
-            xlsx = pd.ExcelFile(f_dongche)
+        f = os.path.join(DATA_DIR, "懂车帝评论.xlsx")
+        if os.path.exists(f):
+            xlsx = pd.ExcelFile(f)
             for sheet in xlsx.sheet_names:
                 dongche_count += len(xlsx.parse(sheet))
-        
-        f_douyin = os.path.join(DATA_DIR, "抖音评论.xlsx")
-        if os.path.exists(f_douyin):
-            xlsx = pd.ExcelFile(f_douyin)
+        f = os.path.join(DATA_DIR, "抖音评论.xlsx")
+        if os.path.exists(f):
+            xlsx = pd.ExcelFile(f)
             for sheet in xlsx.sheet_names:
                 douyin_count += len(xlsx.parse(sheet))
     except Exception:
         pass
 
     total_count = dongche_count + douyin_count
-
-    print(f"[配置]")
-    print(f"   模型: {MODEL_NAME}")
-    print(f"   硬件: RTX 5070 12GB")
-    print(f"   懂车帝: {dongche_count} 条")
-    print(f"   抖音: {douyin_count} 条")
-    print(f"   合计: {total_count} 条")
+    print(f"[配置] 模型: {MODEL_NAME} | 硬件: RTX 5070 12GB")
+    print(f"       并发: {MAX_WORKERS} 线程 | 批次: {BATCH_SIZE} 条/批 | num_ctx: {NUM_CTX}")
+    print(f"[数据] 懂车帝: {dongche_count} 条 | 抖音: {douyin_count} 条 | 合计: {total_count} 条")
     print("="*60)
 
-    # 交互式选择数据源
     print("\n[选择] 请选择处理数据源:")
     print("   1. 懂车帝")
     print("   2. 抖音")
-    print("   3. 全部 (懂车帝 + 抖音)")
+    print("   3. 全部")
     print("   0. 退出")
-    
+
     source_choice = input("\n请输入选项 (0-3): ").strip()
-    
-    source_map = {
-        '1': ('dongche', dongche_count),
-        '2': ('douyin', douyin_count),
-        '3': (None, total_count)
-    }
-    
+    source_map = {'1': ('dongche', dongche_count), '2': ('douyin', douyin_count), '3': (None, total_count)}
+
     if source_choice == '0':
-        print("已退出")
-        return
+        print("已退出"); return
     elif source_choice not in source_map:
-        print("无效选项")
-        return
-        
+        print("无效选项"); return
+
     source, source_total = source_map[source_choice]
     source_name = {'dongche': '懂车帝', 'douyin': '抖音', None: '全部'}[source]
 
-    # 选择数据量
     print(f"\n[选择] {source_name}数据量:")
     print("   1. 测试 10 条")
     print("   2. 测试 50 条")
@@ -549,39 +642,30 @@ def main():
     print("   4. 测试 500 条")
     print("   5. 测试 1000 条")
     print(f"   6. 全部 {source_total} 条")
-    
+
     limit_choice = input("\n请输入选项 (1-6): ").strip()
     limit_options = {'1': 10, '2': 50, '3': 100, '4': 500, '5': 1000, '6': source_total}
-    
+
     global MAX_COMMENTS
     MAX_COMMENTS = limit_options.get(limit_choice, source_total)
-    
     print(f"\n[确认] 将处理 {source_name} 数据: {MAX_COMMENTS} 条")
     print("="*60)
 
-    # 检查Ollama
     if not check_ollama():
-        print("\n[错误] 请先启动Ollama服务")
-        return
+        print("\n[错误] 请先启动Ollama服务"); return
 
-    # 加载数据
     df = load_data(limit=MAX_COMMENTS, source=source)
-    
     if df.empty:
         return
 
-    # 分析评论
     results = analyze_all_comments(df, source_name=source_name)
-    
-    # 保存最终结果
     df_output = save_results(df, results, source_name=source_name)
-    
-    # 生成统计
     generate_statistics(df_output)
-    
+
     print("\n" + "="*60)
     print("[完成] 分析完成!")
     print("="*60)
+
 
 if __name__ == "__main__":
     main()
